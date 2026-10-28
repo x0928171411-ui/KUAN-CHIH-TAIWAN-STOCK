@@ -1,1 +1,38 @@
+name: 台股盤後選股
 
+on:
+  schedule:
+    # GitHub 的 cron 是 UTC。10:00 UTC = 台灣時間 18:00，且只排週一到週五。
+    # 國定假日沒有收盤資料，程式會自己略過，不推播。
+    - cron: "0 10 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 取出程式
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 執行選股
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          SCAN_MODE: ${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}
+          PYTHONUNBUFFERED: "1"
+          TZ: Asia/Taipei
+        run: python main.py
