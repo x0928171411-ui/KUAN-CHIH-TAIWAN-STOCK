@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -10,7 +11,9 @@ from scanner.config import Settings
 from scanner.http_client import HttpClient
 from scanner.rules import improving_margins, latest_quarter_operating_cashflow, three_month_yoys
 
+logger = logging.getLogger(__name__)
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+_skip_token = False
 
 
 @dataclass(frozen=True)
@@ -51,10 +54,27 @@ def evaluate(client: HttpClient, stock_id: str, asof: date, settings: Settings) 
 
 
 def _fetch(client: HttpClient, dataset: str, stock_id: str, start_date: str, settings: Settings) -> list[dict]:
-    headers = {}
-    token = os.getenv("FINMIND_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    global _skip_token
+    token = "" if _skip_token else os.getenv("FINMIND_TOKEN", "").strip()
+    try:
+        return _fetch_once(client, dataset, stock_id, start_date, settings, token)
+    except RuntimeError as exc:
+        if not token or "Token is illegal" not in str(exc):
+            raise
+        _skip_token = True
+        logger.warning("FinMind token 無法使用，改以匿名額度查詢")
+        return _fetch_once(client, dataset, stock_id, start_date, settings, "")
+
+
+def _fetch_once(
+    client: HttpClient,
+    dataset: str,
+    stock_id: str,
+    start_date: str,
+    settings: Settings,
+    token: str,
+) -> list[dict]:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     payload = client.get_json(
         FINMIND_URL,
         params={"dataset": dataset, "data_id": stock_id, "start_date": start_date},
