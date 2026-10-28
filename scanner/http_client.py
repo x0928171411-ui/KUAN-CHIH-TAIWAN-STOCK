@@ -48,6 +48,9 @@ class HttpClient:
                 time.sleep(min(8, 2**attempt))
             try:
                 response = self.session.get(url, params=params, headers=headers, timeout=40)
+                if response.status_code in {400, 401, 403}:
+                    detail = " ".join(response.text.split())[:180]
+                    raise RuntimeError(f"資料源拒絕請求：{detail}")
                 if response.status_code in {429, 500, 502, 503, 504}:
                     last_error = RuntimeError(f"HTTP {response.status_code} {url}")
                     logger.warning("暫時失敗 %s %s，準備重試", response.status_code, url)
