@@ -16,6 +16,7 @@ from scanner.config import Settings
 from scanner.fundamentals import evaluate
 from scanner.http_client import HttpClient
 from scanner.market_data import (
+    align_scheduled_start,
     load_foreign_net,
     load_official_revenue_yoy,
     load_price_history,
@@ -62,8 +63,11 @@ def run() -> int:
         logger.warning("沒有 FINMIND_TOKEN，將以 FinMind 免費匿名額度查財報，檔數一多可能被限制")
 
     now = datetime.now(ZoneInfo("Asia/Taipei"))
-    today = now.date()
     mode = os.getenv("SCAN_MODE", "manual").strip() or "manual"
+    if mode == "schedule":
+        now = align_scheduled_start(now)
+    today = now.date()
+    logger.info("開始選股：台北時間 %s", now.strftime("%Y-%m-%d %H:%M"))
     client = HttpClient()
     session = resolve_session(client, today, mode, settings, now=now)
     if session is None:

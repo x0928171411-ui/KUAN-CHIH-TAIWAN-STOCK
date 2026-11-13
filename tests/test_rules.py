@@ -8,7 +8,14 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scanner.config import Settings
-from scanner.market_data import _bars_from_table, _foreign_column, _to_float, resolve_session
+from scanner.market_data import (
+    _bars_from_table,
+    _foreign_column,
+    _to_float,
+    align_scheduled_start,
+    resolve_session,
+    scheduled_send_at,
+)
 from scanner.models import Bar, Pick
 from scanner.report import format_report
 from scanner.rules import (
@@ -168,6 +175,24 @@ class RuleTests(unittest.TestCase):
             extension=0.012,
             min_yoy=0.2,
         ), 0)
+
+    def test_weekday_schedule_waits_until_1800(self) -> None:
+        taipei = ZoneInfo("Asia/Taipei")
+        noon = datetime(2026, 11, 13, 12, 45, tzinfo=taipei)
+        target = datetime(2026, 11, 13, 18, 0, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(noon), target)
+        slept: list[float] = []
+        finished = align_scheduled_start(noon, sleep=slept.append, clock=lambda: target)
+        self.assertEqual(finished, target)
+        self.assertEqual(sum(slept), 5 * 60 * 60 + 15 * 60)
+        self.assertLessEqual(max(slept), 600)
+
+        already = datetime(2026, 11, 13, 19, 5, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(already), already)
+        late_night = datetime(2026, 11, 14, 1, 30, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(late_night), late_night)
+        weekend = datetime(2026, 11, 14, 15, 0, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(weekend), weekend)
 
     def test_late_schedule_uses_the_previous_weekday(self) -> None:
         taipei = ZoneInfo("Asia/Taipei")

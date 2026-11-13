@@ -25,6 +25,51 @@ TPEX_REVENUE_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
 TWSE_HEADERS = {"Referer": "https://www.twse.com.tw/zh/trading/historical/mi-index.html"}
 TPEX_HEADERS = {"Referer": "https://www.tpex.org.tw/"}
 YOY_FIELD = "營業收入-去年同月增減(%)"
+# 週一到週五的推播鐘點（台北）。12:00 到這個鐘點之前啟動的排程會先等到整點。
+SEND_HOUR = 18
+WAIT_FROM_HOUR = 12
+
+
+def scheduled_send_at(now: datetime) -> datetime:
+    """排程應開始抓資料的時間。
+
+    平日 12:00 到 18:00 之間啟動，是今天這班，等到 18:00。
+    18:00 之後直接開始。午夜到中午、以及週末，是前一班被拖晚，不再多等。
+    """
+    local = _as_taipei(now)
+    if local.weekday() < 5 and WAIT_FROM_HOUR <= local.hour < SEND_HOUR:
+        return local.replace(hour=SEND_HOUR, minute=0, second=0, microsecond=0)
+    return local
+
+
+def align_scheduled_start(now: datetime, sleep=time.sleep, clock=None) -> datetime:
+    """排程若早於 18:00 進到執行環境，就睡到 18:00 再往下跑。"""
+    local = _as_taipei(now)
+    target = scheduled_send_at(local)
+    remaining = (target - local).total_seconds()
+    if remaining <= 0:
+        return local
+    logger.info(
+        "固定於週一至週五 %s:00（台北）推播。現在 %s，先等待 %.0f 分鐘",
+        SEND_HOUR,
+        local.strftime("%H:%M"),
+        remaining / 60,
+    )
+    while remaining > 0:
+        chunk = min(remaining, 600)
+        sleep(chunk)
+        remaining -= chunk
+        if remaining > 0:
+            logger.info("距離 %s:00 還有 %.0f 分鐘", SEND_HOUR, remaining / 60)
+    if clock is not None:
+        return clock()
+    return datetime.now(ZoneInfo("Asia/Taipei"))
+
+
+def _as_taipei(now: datetime) -> datetime:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+    return now.astimezone(ZoneInfo("Asia/Taipei"))
 
 
 def resolve_session(
@@ -37,9 +82,10 @@ def resolve_session(
     """決定這次要分析哪個收盤日。
 
     手動執行時，今天還沒有資料就往前找最近一個交易日。
-    排程若在台北時間 16:00 前啟動，而且今天還沒收盤，代表 GitHub 把
-    前一個交易日的工作拖過午夜，改看上一個平日。16:00 之後仍只等今天的資料，
-    避免晚上資料晚到時把前一天再推一次。國定假日的前一個平日沒有收盤，就結束。
+    排程在中午以前啟動、而且今天還沒有收盤，代表前一個交易日的工作被拖過午夜，
+    改看上一個平日。中午以後只等今天的資料，避免把前一天再推一次。
+    國定假日的前一個平日沒有收盤，就結束。平日 12:00 到 18:00 之間的等待由
+    align_scheduled_start 負責，這裡收到的時間應該已經是 18:00 之後。
     """
     if _has_session(client, today, settings):
         return today
@@ -68,11 +114,9 @@ def resolve_session(
 
 
 def _run_is_before_close(now: datetime) -> bool:
-    """16:00 前通常還沒有「今天」的收盤。這時候缺資料是排程晚到，不是假日。"""
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=ZoneInfo("Asia/Taipei"))
-    local = now.astimezone(ZoneInfo("Asia/Taipei"))
-    return local.hour < 16
+    """中午以前沒有「今天」的收盤。這時候缺資料是前一天的排程拖過午夜，不是假日。"""
+    local = _as_taipei(now)
+    return local.hour < WAIT_FROM_HOUR
 
 
 def _previous_weekday(day: date) -> date:
