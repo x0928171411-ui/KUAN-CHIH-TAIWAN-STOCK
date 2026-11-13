@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from scanner.config import Settings
 from scanner.http_client import HttpClient
@@ -26,12 +27,30 @@ TPEX_HEADERS = {"Referer": "https://www.tpex.org.tw/"}
 YOY_FIELD = "營業收入-去年同月增減(%)"
 
 
-def resolve_session(client: HttpClient, today: date, mode: str, settings: Settings) -> date | None:
-    """排程只分析今天的收盤。手動執行時，若今天還沒有資料，改看最近一個交易日。"""
+def resolve_session(
+    client: HttpClient,
+    today: date,
+    mode: str,
+    settings: Settings,
+    now: datetime | None = None,
+) -> date | None:
+    """決定這次要分析哪個收盤日。
+
+    手動執行時，今天還沒有資料就往前找最近一個交易日。
+    排程若在台北時間 16:00 前啟動，而且今天還沒收盤，代表 GitHub 把
+    前一個交易日的工作拖過午夜，改看上一個平日。16:00 之後仍只等今天的資料，
+    避免晚上資料晚到時把前一天再推一次。國定假日的前一個平日沒有收盤，就結束。
+    """
     if _has_session(client, today, settings):
         return today
     if mode == "schedule":
-        if today.weekday() >= 5:
+        if now is None:
+            now = datetime.now(ZoneInfo("Asia/Taipei"))
+        fallback = _previous_weekday(today) if _run_is_before_close(now) or today.weekday() >= 5 else None
+        if fallback is not None:
+            if _has_session(client, fallback, settings):
+                logger.info("排程已過午夜，改看上一個交易日 %s", fallback.isoformat())
+                return fallback
             return None
         for _ in range(2):
             logger.info("今天是交易日但收盤資料還沒齊，20 秒後再查一次")
@@ -46,6 +65,21 @@ def resolve_session(client: HttpClient, today: date, mode: str, settings: Settin
             return cursor
         cursor -= timedelta(days=1)
     return None
+
+
+def _run_is_before_close(now: datetime) -> bool:
+    """16:00 前通常還沒有「今天」的收盤。這時候缺資料是排程晚到，不是假日。"""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+    local = now.astimezone(ZoneInfo("Asia/Taipei"))
+    return local.hour < 16
+
+
+def _previous_weekday(day: date) -> date:
+    cursor = day - timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor -= timedelta(days=1)
+    return cursor
 
 
 def load_price_history(
