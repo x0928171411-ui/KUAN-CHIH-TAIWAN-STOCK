@@ -16,6 +16,7 @@ from scanner.config import Settings
 from scanner.fundamentals import evaluate
 from scanner.http_client import HttpClient
 from scanner.market_data import (
+    align_scheduled_start,
     load_foreign_net,
     load_official_revenue_yoy,
     load_price_history,
@@ -61,10 +62,14 @@ def run() -> int:
     if not os.getenv("FINMIND_TOKEN", "").strip():
         logger.warning("沒有 FINMIND_TOKEN，將以 FinMind 免費匿名額度查財報，檔數一多可能被限制")
 
-    today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    now = datetime.now(ZoneInfo("Asia/Taipei"))
     mode = os.getenv("SCAN_MODE", "manual").strip() or "manual"
+    if mode == "schedule":
+        now = align_scheduled_start(now)
+    today = now.date()
+    logger.info("開始選股：台北時間 %s", now.strftime("%Y-%m-%d %H:%M"))
     client = HttpClient()
-    session = resolve_session(client, today, mode, settings)
+    session = resolve_session(client, today, mode, settings, now=now)
     if session is None:
         logger.info("今日非交易日，或收盤資料尚未公布，不推播")
         return 0
@@ -92,7 +97,7 @@ def run() -> int:
     picks.sort(key=lambda pick: (-pick.score, -pick.foreign_net_shares, pick.stock_id))
     top = picks[: settings.top_n]
     manual_note = ""
-    if mode != "schedule" and session != today:
+    if session != today:
         manual_note = f"今天 {today.isoformat()} 尚無收盤資料，這份是最近交易日 {session.isoformat()} 的結果。"
     text = format_report(session, top, len(picks), settings, note=note, manual_note=manual_note)
     if top:

@@ -1,12 +1,21 @@
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scanner.config import Settings
-from scanner.market_data import _bars_from_table, _foreign_column, _to_float
+from scanner.market_data import (
+    _bars_from_table,
+    _foreign_column,
+    _to_float,
+    align_scheduled_start,
+    resolve_session,
+    scheduled_send_at,
+)
 from scanner.models import Bar, Pick
 from scanner.report import format_report
 from scanner.rules import (
@@ -166,6 +175,88 @@ class RuleTests(unittest.TestCase):
             extension=0.012,
             min_yoy=0.2,
         ), 0)
+
+    def test_weekday_schedule_waits_until_1800(self) -> None:
+        taipei = ZoneInfo("Asia/Taipei")
+        noon = datetime(2026, 11, 13, 12, 45, tzinfo=taipei)
+        target = datetime(2026, 11, 13, 18, 0, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(noon), target)
+        slept: list[float] = []
+        finished = align_scheduled_start(noon, sleep=slept.append, clock=lambda: target)
+        self.assertEqual(finished, target)
+        self.assertEqual(sum(slept), 5 * 60 * 60 + 15 * 60)
+        self.assertLessEqual(max(slept), 600)
+
+        already = datetime(2026, 11, 13, 19, 5, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(already), already)
+        late_night = datetime(2026, 11, 14, 1, 30, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(late_night), late_night)
+        weekend = datetime(2026, 11, 14, 15, 0, tzinfo=taipei)
+        self.assertEqual(scheduled_send_at(weekend), weekend)
+
+    def test_late_schedule_uses_the_previous_weekday(self) -> None:
+        taipei = ZoneInfo("Asia/Taipei")
+
+        def has_session(_client, day, _settings):
+            return day in {date(2026, 11, 6), date(2026, 11, 12)}
+
+        with patch("scanner.market_data._has_session", side_effect=has_session):
+            after_midnight = resolve_session(
+                None,
+                date(2026, 11, 13),
+                "schedule",
+                Settings(),
+                now=datetime(2026, 11, 13, 1, 46, tzinfo=taipei),
+            )
+            saturday = resolve_session(
+                None,
+                date(2026, 11, 7),
+                "schedule",
+                Settings(),
+                now=datetime(2026, 11, 7, 0, 59, tzinfo=taipei),
+            )
+        self.assertEqual(after_midnight, date(2026, 11, 12))
+        self.assertEqual(saturday, date(2026, 11, 6))
+
+        def holiday(_client, day, _settings):
+            return day == date(2026, 11, 10)
+
+        with patch("scanner.market_data._has_session", side_effect=holiday):
+            holiday_morning = resolve_session(
+                None,
+                date(2026, 11, 12),
+                "schedule",
+                Settings(),
+                now=datetime(2026, 11, 12, 1, 0, tzinfo=taipei),
+            )
+        self.assertIsNone(holiday_morning)
+
+    def test_evening_schedule_does_not_resend_the_previous_day(self) -> None:
+        taipei = ZoneInfo("Asia/Taipei")
+
+        def has_session(_client, day, _settings):
+            return day == date(2026, 11, 12)
+
+        with patch("scanner.market_data.time.sleep"), patch(
+            "scanner.market_data._has_session", side_effect=has_session
+        ) as probed:
+            missed_today = resolve_session(
+                None,
+                date(2026, 11, 13),
+                "schedule",
+                Settings(),
+                now=datetime(2026, 11, 13, 18, 30, tzinfo=taipei),
+            )
+            on_time = resolve_session(
+                None,
+                date(2026, 11, 12),
+                "schedule",
+                Settings(),
+                now=datetime(2026, 11, 12, 18, 43, tzinfo=taipei),
+            )
+        self.assertIsNone(missed_today)
+        self.assertEqual(on_time, date(2026, 11, 12))
+        self.assertEqual([call.args[1] for call in probed.call_args_list], [date(2026, 11, 13)] * 3 + [date(2026, 11, 12)])
 
     def test_market_parsers(self) -> None:
         self.assertEqual(_to_float("1,234.50"), 1234.5)
